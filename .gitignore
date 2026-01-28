@@ -1,0 +1,18 @@
+# Environment files
+.env
+
+# Python virtual environment
+.venv/
+
+# Output directories
+ToBurmeseVideoOutput/
+
+# Output files
+output.txt
+text.txt
+
+# Binary
+video
+
+# Video files
+*.mp4
