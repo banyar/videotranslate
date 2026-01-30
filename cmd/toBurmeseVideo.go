@@ -206,13 +206,22 @@ func sanitizeFileName(name string) string {
 	return result
 }
 
+// getProjectDir returns the current working directory
+func getProjectDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return dir
+}
+
 // Speech-to-Text (Whisper အသုံးပြုခြင်း)
 func speechToText(audioFile, outputFile string) (string, error) {
 	// Whisper CLI သုံးခြင်း (Python Whisper ထည့်သွင်းရမည်)
 	whisperPath := filepath.Join(filepath.Dir(os.Args[0]), "..", ".venv", "bin", "whisper")
-	// If running with go run, use absolute path
+	// If running with go run, use current working directory
 	if _, err := os.Stat(whisperPath); os.IsNotExist(err) {
-		whisperPath = "/home/banyar-sithu/FrontiirProjects/video/.venv/bin/whisper"
+		whisperPath = filepath.Join(getProjectDir(), ".venv", "bin", "whisper")
 	}
 
 	// Get the output directory from the outputFile path
@@ -251,11 +260,20 @@ func translateToBurmese(text, outputFile string) (string, error) {
 
 	// Alternative: Python subprocess သုံးခြင်း (deep-translator အသုံးပြု - အခမဲ့)
 	pythonPath := filepath.Join(filepath.Dir(os.Args[0]), "..", ".venv", "bin", "python3")
-	// If running with go run, use absolute path
+	// If running with go run, use current working directory
 	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
-		pythonPath = "/home/banyar-sithu/FrontiirProjects/video/.venv/bin/python3"
+		pythonPath = filepath.Join(getProjectDir(), ".venv", "bin", "python3")
 	}
-	cmd := exec.Command(pythonPath, "-c", `
+
+	// Split text into chunks of max 4500 characters (under 5000 limit)
+	// Split on sentence boundaries where possible
+	chunks := splitTextIntoChunks(text, 4500)
+	var translatedChunks []string
+
+	for i, chunk := range chunks {
+		fmt.Printf("  Translating chunk %d/%d...\n", i+1, len(chunks))
+
+		cmd := exec.Command(pythonPath, "-c", `
 import sys
 from deep_translator import GoogleTranslator
 translator = GoogleTranslator(source='en', target='my')
@@ -264,44 +282,48 @@ result = translator.translate(text)
 print(result)
 `)
 
-	// Stream stderr to show progress in real-time
-	cmd.Stderr = os.Stderr
+		// Stream stderr to show progress in real-time
+		cmd.Stderr = os.Stderr
 
-	// Set up stdin pipe to send text
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return "", fmt.Errorf("stdin pipe error: %w", err)
+		// Set up stdin pipe to send text
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return "", fmt.Errorf("stdin pipe error: %w", err)
+		}
+
+		// Capture stdout for the result
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return "", fmt.Errorf("stdout pipe error: %w", err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			return "", fmt.Errorf("start error: %w", err)
+		}
+
+		// Write text to stdin and close
+		_, err = stdin.Write([]byte(chunk))
+		if err != nil {
+			return "", fmt.Errorf("write error: %w", err)
+		}
+		stdin.Close()
+
+		// Read the output
+		output, err := io.ReadAll(stdout)
+		if err != nil {
+			return "", fmt.Errorf("read error: %w", err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			// Fallback: အင်္ဂလိပ်စာ ပြန်ပေးခြင်း
+			translatedChunks = append(translatedChunks, "Translation error - "+chunk)
+			continue
+		}
+
+		translatedChunks = append(translatedChunks, strings.TrimSpace(string(output)))
 	}
 
-	// Capture stdout for the result
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", fmt.Errorf("stdout pipe error: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start error: %w", err)
-	}
-
-	// Write text to stdin and close
-	_, err = stdin.Write([]byte(text))
-	if err != nil {
-		return "", fmt.Errorf("write error: %w", err)
-	}
-	stdin.Close()
-
-	// Read the output
-	output, err := io.ReadAll(stdout)
-	if err != nil {
-		return "", fmt.Errorf("read error: %w", err)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		// Fallback: အင်္ဂလိပ်စာ ပြန်ပေးခြင်း
-		return "Translation error - " + text, nil
-	}
-
-	result := strings.TrimSpace(string(output))
+	result := strings.Join(translatedChunks, " ")
 
 	// Save to output file
 	if err := os.WriteFile(outputFile, []byte(result), 0644); err != nil {
@@ -311,25 +333,87 @@ print(result)
 	return result, nil
 }
 
+// splitTextIntoChunks splits text into chunks of maxSize characters
+// trying to split on sentence boundaries
+func splitTextIntoChunks(text string, maxSize int) []string {
+	if len(text) <= maxSize {
+		return []string{text}
+	}
+
+	var chunks []string
+	remaining := text
+
+	for len(remaining) > 0 {
+		if len(remaining) <= maxSize {
+			chunks = append(chunks, remaining)
+			break
+		}
+
+		// Find a good split point (end of sentence) within maxSize
+		chunk := remaining[:maxSize]
+		splitPoint := maxSize
+
+		// Try to find sentence ending (.!?) followed by space
+		for i := maxSize - 1; i > maxSize/2; i-- {
+			if (chunk[i] == '.' || chunk[i] == '!' || chunk[i] == '?') &&
+				(i+1 >= len(chunk) || chunk[i+1] == ' ' || chunk[i+1] == '\n') {
+				splitPoint = i + 1
+				break
+			}
+		}
+
+		// If no sentence boundary found, try to split on space
+		if splitPoint == maxSize {
+			for i := maxSize - 1; i > maxSize/2; i-- {
+				if chunk[i] == ' ' {
+					splitPoint = i + 1
+					break
+				}
+			}
+		}
+
+		chunks = append(chunks, strings.TrimSpace(remaining[:splitPoint]))
+		remaining = strings.TrimSpace(remaining[splitPoint:])
+	}
+
+	return chunks
+}
+
 // Result များကို File သိမ်းဆည်းခြင်း
 func saveResults(english, burmese, filename string) error {
 	content := fmt.Sprintf("=== YouTube Speech-to-Text Results ===\n\nEnglish:\n%s\n\nBurmese:\n%s\n", english, burmese)
 	return os.WriteFile(filename, []byte(content), 0644)
 }
 
+// getVoiceName returns the Edge TTS voice based on VOICE_PRESENTER env value
+// Options: men/thiha -> male voice, women/girl -> female voice
+// Default: men (male voice)
+func getVoiceName() string {
+	presenter := strings.ToLower(os.Getenv("VOICE_PRESENTER"))
+	switch presenter {
+	case "women", "girl":
+		return "my-MM-NilarNeural" // အမျိုးသမီးအသံ
+	case "men", "thiha", "":
+		return "my-MM-ThihaNeural" // အမျိုးသားအသံ
+	default:
+		return "my-MM-ThihaNeural" // default: အမျိုးသားအသံ
+	}
+}
+
 // Text-to-Speech for Burmese (Edge TTS အသုံးပြု - အရည်အသွေးပိုကောင်း)
 func textToSpeechBurmese(textFile, outputAudio string) error {
 	edgeTTSPath := filepath.Join(filepath.Dir(os.Args[0]), "..", ".venv", "bin", "edge-tts")
 	if _, err := os.Stat(edgeTTSPath); os.IsNotExist(err) {
-		edgeTTSPath = "/home/banyar-sithu/FrontiirProjects/video/.venv/bin/edge-tts"
+		edgeTTSPath = filepath.Join(getProjectDir(), ".venv", "bin", "edge-tts")
 	}
 
-	fmt.Println("🔊 Generating Burmese audio with Edge TTS...")
+	voiceName := getVoiceName()
+	fmt.Printf("🔊 Generating Burmese audio with Edge TTS (voice: %s)...\n", voiceName)
 
-	// Use Edge TTS with Myanmar female voice (clearer pronunciation)
+	// Use Edge TTS with Myanmar voice
 	// --rate: speech speed (-50% to +100%), --pitch: voice pitch
 	cmd := exec.Command(edgeTTSPath,
-		"--voice", "my-MM-ThihaNeural", // အမျိုးသားအသံ
+		"--voice", voiceName,
 		"--file", textFile,
 		"--write-media", outputAudio,
 		"--rate=-10%", // slightly slower for clarity

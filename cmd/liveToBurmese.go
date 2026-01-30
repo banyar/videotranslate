@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
@@ -34,12 +35,28 @@ const (
 )
 
 func live() {
+	// Load .env file for voice configuration
+	if err := godotenv.Load(); err != nil {
+		fmt.Println("⚠️ Warning: .env file not found, using default voice")
+	}
+
+	// Create output directory for live recordings
+	projectDir, err := os.Getwd()
+	if err != nil {
+		projectDir = "."
+	}
+	liveRecordDir := filepath.Join(projectDir, "LiveRecordOutput")
+	if err := os.MkdirAll(liveRecordDir, 0755); err != nil {
+		fmt.Println("❌ Failed to create LiveRecordOutput directory:", err)
+		return
+	}
+
 	fmt.Println("🎤 တိုက်ရိုက် ဘာသာပြန်စနစ် စတင်နေသည်...")
 	fmt.Println("📢 English စကားပြောပါ - မြန်မာလို ပြန်ပေးပါမည်")
+	fmt.Printf("🔊 Voice: %s\n", getLiveVoiceName())
+	fmt.Printf("📁 Output: %s\n", liveRecordDir)
 	fmt.Println("⏹️  ရပ်ရန် Ctrl+C နှိပ်ပါ")
 	fmt.Println(strings.Repeat("─", 50))
-
-	projectDir := "/home/banyar-sithu/FrontiirProjects/video"
 
 	// Handle Ctrl+C for graceful shutdown
 	stopChan := make(chan os.Signal, 1)
@@ -60,7 +77,7 @@ func live() {
 		}
 
 		chunkNum++
-		audioFile := filepath.Join(projectDir, fmt.Sprintf("chunk_%d.wav", chunkNum))
+		audioFile := filepath.Join(liveRecordDir, fmt.Sprintf("chunk_%d.wav", chunkNum))
 
 		// Record audio chunk
 		fmt.Printf("\n🔴 [%d] Recording...\n", chunkNum)
@@ -165,9 +182,18 @@ func processLiveTranslation(audioFile string) {
 	fmt.Println("✅ ပြီးစီးပါပြီ")
 }
 
+// getLiveProjectDir returns the current working directory
+func getLiveProjectDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return dir
+}
+
 // Speech-to-Text using Whisper
 func liveConvertSpeechToEnglish(audioFile string) (string, error) {
-	whisperPath := "/home/banyar-sithu/FrontiirProjects/video/.venv/bin/whisper"
+	whisperPath := filepath.Join(getLiveProjectDir(), ".venv", "bin", "whisper")
 	outputDir := filepath.Dir(audioFile)
 
 	cmd := exec.Command(whisperPath, audioFile,
@@ -199,7 +225,7 @@ func liveConvertSpeechToEnglish(audioFile string) (string, error) {
 func liveTranslateToBurmese(englishText string) (string, error) {
 	pythonPath := filepath.Join(filepath.Dir(os.Args[0]), "..", ".venv", "bin", "python3")
 	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
-		pythonPath = "/home/banyar-sithu/FrontiirProjects/video/.venv/bin/python3"
+		pythonPath = filepath.Join(getLiveProjectDir(), ".venv", "bin", "python3")
 	}
 
 	cmd := exec.Command(pythonPath, "-c", `
@@ -245,18 +271,34 @@ print(result)
 	return strings.TrimSpace(string(output)), nil
 }
 
+// getLiveVoiceName returns the Edge TTS voice based on VOICE_PRESENTER env value
+// Options: men/thiha -> male voice, women/girl -> female voice
+// Default: men (male voice)
+func getLiveVoiceName() string {
+	presenter := strings.ToLower(os.Getenv("VOICE_PRESENTER"))
+	switch presenter {
+	case "women", "girl":
+		return "my-MM-NilarNeural" // အမျိုးသမီးအသံ
+	case "men", "thiha", "":
+		return "my-MM-ThihaNeural" // အမျိုးသားအသံ
+	default:
+		return "my-MM-ThihaNeural" // default: အမျိုးသားအသံ
+	}
+}
+
 // Text-to-Speech using Edge TTS
 func liveSpeakBurmese(burmeseText string) error {
 	edgeTTSPath := filepath.Join(filepath.Dir(os.Args[0]), "..", ".venv", "bin", "edge-tts")
 	if _, err := os.Stat(edgeTTSPath); os.IsNotExist(err) {
-		edgeTTSPath = "/home/banyar-sithu/FrontiirProjects/video/.venv/bin/edge-tts"
+		edgeTTSPath = filepath.Join(getLiveProjectDir(), ".venv", "bin", "edge-tts")
 	}
 
 	outputAudio := "live_output.mp3"
+	voiceName := getLiveVoiceName()
 
 	// Generate audio using Edge TTS
 	cmd := exec.Command(edgeTTSPath,
-		"--voice", "my-MM-ThihaNeural",
+		"--voice", voiceName,
 		"--text", burmeseText,
 		"--write-media", outputAudio,
 		"--rate=-10%",
